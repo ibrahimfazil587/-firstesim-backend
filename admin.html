@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ku" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FirstESIM Admin</title>
+<style>
+body{font-family:Arial;background:#f4f7fb;margin:0;color:#172033}.wrap{max-width:900px;margin:auto;padding:20px}
+h1{color:#0862bd}.box,.order{background:#fff;border-radius:18px;padding:16px;margin:12px 0;box-shadow:0 5px 20px #0001}
+input,select,button{padding:12px;border-radius:10px;border:1px solid #ddd;margin:5px}button{background:#0862bd;color:white;border:0;font-weight:800}
+.status{padding:5px 9px;border-radius:10px;background:#eef6ff}.qr{max-width:180px;display:block;margin:10px 0}
+</style></head><body><div class="wrap">
+<h1>FirstESIM — Admin Panel</h1>
+<div class="box"><input id="key" placeholder="Admin Key" type="password"><button onclick="loadOrders()">کردنەوەی Orders</button></div>
+<div id="orders"></div>
+</div>
+<script>
+let KEY="";
+async function loadOrders(){
+ KEY=document.getElementById("key").value;
+ const r=await fetch("/api/admin/orders",{headers:{"x-admin-key":KEY}});
+ const d=await r.json(); if(!r.ok){alert("Admin Key هەڵەیە");return}
+ document.getElementById("orders").innerHTML=d.orders.map(o=>`
+ <div class="order">
+ <b>${o.id}</b><p>${o.country} — ${o.plan} — ${o.price}</p>
+ <p>کڕیار: ${o.customerName||"-"} ${o.customerPhone||""}</p>
+ <p>پارەدان: ${o.payment||"-"}</p>
+ <p>دۆخ: <span class="status">${o.status}</span></p>
+ ${o.receiptUrl?`<a href="${o.receiptUrl}" target="_blank">بینینی پسوڵە</a>`:""}
+ <hr>
+ <form onsubmit="sendQR(event,'${o.id}')">
+ <input name="qr" type="file" accept="image/*" required>
+ <input name="activationCode" placeholder="Activation Code (ئارەزوومەندانە)">
+ <button>ناردنی QR بۆ کڕیار</button>
+ </form>
+ </div>`).join("");
+}
+async function sendQR(e,id){
+ e.preventDefault(); const fd=new FormData(e.target);
+ const r=await fetch("/api/admin/orders/"+id+"/qr",{method:"POST",headers:{"x-admin-key":KEY},body:fd});
+ const d=await r.json(); if(!r.ok){alert(d.error||"هەڵە");return}
+ alert("QR Code نێردرا و Order ـەکە ئامادە کرا.");
+ loadOrders();
+}
+</script></body></html>

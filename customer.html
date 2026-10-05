@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ku" dir="rtl">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FirstESIM Order</title>
+<style>
+body{font-family:Arial;background:#f4f7fb;margin:0;color:#172033}.wrap{max-width:600px;margin:auto;padding:20px}
+.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 5px 20px #0001}
+input,button{width:100%;padding:13px;margin:6px 0;border-radius:11px;border:1px solid #ddd}button{background:#0862bd;color:#fff;border:0;font-weight:800}.qr{max-width:280px;display:block;margin:15px auto}
+</style></head><body><div class="wrap"><h1>🌍 FirstESIM</h1>
+<div class="card"><input id="id" placeholder="ژمارەی Order ـەکە بنووسە"><button onclick="find()">بینینی سەفارش</button></div>
+<div id="result"></div></div>
+<script>
+async function find(){
+ const id=document.getElementById("id").value.trim(); if(!id)return;
+ const r=await fetch("/api/orders/"+encodeURIComponent(id)); const d=await r.json();
+ if(!r.ok){document.getElementById("result").innerHTML="<div class='card'>Order نەدۆزرایەوە.</div>";return}
+ const o=d.order;
+ document.getElementById("result").innerHTML=`<div class="card"><h2>${o.country}</h2><p>${o.plan}</p><p>${o.price}</p><b>دۆخ: ${o.status}</b>
+ ${o.qrUrl?`<hr><h2>eSIM ئامادەیە ✅</h2><img class="qr" src="${o.qrUrl}"><p>${o.activationCode||""}</p>`:"<p>تکایە چاوەڕوان بە تا QR Code ئامادە بکرێت.</p>"}</div>`;
+}
+</script></body></html>
