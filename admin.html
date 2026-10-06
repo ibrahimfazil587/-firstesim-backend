@@ -1,44 +1,322 @@
 <!doctype html>
 <html lang="ku" dir="rtl">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>FirstESIM Admin</title>
+
 <style>
-body{font-family:Arial;background:#f4f7fb;margin:0;color:#172033}.wrap{max-width:900px;margin:auto;padding:20px}
-h1{color:#0862bd}.box,.order{background:#fff;border-radius:18px;padding:16px;margin:12px 0;box-shadow:0 5px 20px #0001}
-input,select,button{padding:12px;border-radius:10px;border:1px solid #ddd;margin:5px}button{background:#0862bd;color:white;border:0;font-weight:800}
-.status{padding:5px 9px;border-radius:10px;background:#eef6ff}.qr{max-width:180px;display:block;margin:10px 0}
-</style></head><body><div class="wrap">
+body{
+  font-family:Arial;
+  background:#f4f7fb;
+  margin:0;
+  color:#172033;
+}
+.wrap{
+  max-width:900px;
+  margin:auto;
+  padding:20px;
+}
+h1{
+  color:#0862bd;
+}
+.box,.order{
+  background:#fff;
+  border-radius:18px;
+  padding:16px;
+  margin:12px 0;
+  box-shadow:0 5px 20px #0001;
+}
+input,select,button{
+  padding:12px;
+  border-radius:10px;
+  border:1px solid #ddd;
+  margin:5px;
+  box-sizing:border-box;
+}
+input{
+  min-width:220px;
+}
+button{
+  background:#0862bd;
+  color:white;
+  border:0;
+  font-weight:800;
+  cursor:pointer;
+}
+.status{
+  padding:5px 9px;
+  border-radius:10px;
+  background:#eef6ff;
+}
+.qr{
+  max-width:180px;
+  display:block;
+  margin:10px 0;
+}
+#error{
+  color:#c62828;
+  font-weight:bold;
+  margin:10px 0;
+}
+#success{
+  color:#16803c;
+  font-weight:bold;
+  margin:10px 0;
+}
+</style>
+</head>
+
+<body>
+
+<div class="wrap">
+
 <h1>FirstESIM — Admin Panel</h1>
-<div class="box"><input id="key" placeholder="Admin Key" type="password"><button onclick="loadOrders()">کردنەوەی Orders</button></div>
-<div id="orders"></div>
+
+<div class="box">
+
+<input
+  id="key"
+  placeholder="Admin Key"
+  type="password"
+>
+
+<button type="button" onclick="loadOrders()">
+کردنەوەی Orders
+</button>
+
+<div id="error"></div>
+<div id="success"></div>
+
 </div>
+
+<div id="orders"></div>
+
+</div>
+
 <script>
-let KEY="";
+
+const API = "https://firstesim-api.onrender.com";
+
+let KEY = "";
+
 async function loadOrders(){
- KEY=document.getElementById("key").value;
- const r=await fetch("/api/admin/orders",{headers:{"x-admin-key":KEY}});
- const d=await r.json(); if(!r.ok){alert("Admin Key هەڵەیە");return}
- document.getElementById("orders").innerHTML=d.orders.map(o=>`
- <div class="order">
- <b>${o.id}</b><p>${o.country} — ${o.plan} — ${o.price}</p>
- <p>کڕیار: ${o.customerName||"-"} ${o.customerPhone||""}</p>
- <p>پارەدان: ${o.payment||"-"}</p>
- <p>دۆخ: <span class="status">${o.status}</span></p>
- ${o.receiptUrl?`<a href="${o.receiptUrl}" target="_blank">بینینی پسوڵە</a>`:""}
- <hr>
- <form onsubmit="sendQR(event,'${o.id}')">
- <input name="qr" type="file" accept="image/*" required>
- <input name="activationCode" placeholder="Activation Code (ئارەزوومەندانە)">
- <button>ناردنی QR بۆ کڕیار</button>
- </form>
- </div>`).join("");
+
+  const error = document.getElementById("error");
+  const success = document.getElementById("success");
+
+  error.textContent = "";
+  success.textContent = "";
+
+  KEY = document.getElementById("key").value.trim();
+
+  if(!KEY){
+    error.textContent = "تکایە Admin Key بنووسە.";
+    return;
+  }
+
+  try{
+
+    const r = await fetch(API + "/api/admin/orders", {
+      method:"GET",
+      headers:{
+        "x-admin-key":KEY
+      }
+    });
+
+    const text = await r.text();
+
+    let d;
+
+    try{
+      d = JSON.parse(text);
+    }catch{
+      throw new Error("وەڵامی Backend دروست نییە.");
+    }
+
+    if(!r.ok){
+
+      if(r.status === 401){
+        error.textContent = "Admin Key هەڵەیە.";
+      }else{
+        error.textContent =
+          d.error || "هەڵەیەک ڕوویدا.";
+      }
+
+      return;
+    }
+
+    success.textContent =
+      "Orders بە سەرکەوتوویی کرانەوە.";
+
+    const orders = d.orders || [];
+
+    if(orders.length === 0){
+
+      document.getElementById("orders").innerHTML =
+        '<div class="box">هیچ Order ـێک نییە.</div>';
+
+      return;
+    }
+
+    document.getElementById("orders").innerHTML =
+      orders.map(o => `
+
+      <div class="order">
+
+        <h3>${escapeHtml(o.id || "")}</h3>
+
+        <p>
+          <b>وڵات:</b>
+          ${escapeHtml(o.country || "-")}
+        </p>
+
+        <p>
+          <b>پلان:</b>
+          ${escapeHtml(o.plan || "-")}
+        </p>
+
+        <p>
+          <b>نرخ:</b>
+          ${escapeHtml(o.price || "-")}
+        </p>
+
+        <p>
+          <b>کڕیار:</b>
+          ${escapeHtml(o.customerName || "-")}
+        </p>
+
+        <p>
+          <b>ژمارە:</b>
+          ${escapeHtml(o.customerPhone || "-")}
+        </p>
+
+        <p>
+          <b>پارەدان:</b>
+          ${escapeHtml(o.payment || "-")}
+        </p>
+
+        <p>
+          <b>دۆخ:</b>
+          <span class="status">
+            ${escapeHtml(o.status || "-")}
+          </span>
+        </p>
+
+        ${
+          o.receiptUrl
+          ?
+          `<p>
+            <a
+              href="${API}${o.receiptUrl}"
+              target="_blank"
+            >
+              بینینی پسوڵە
+            </a>
+          </p>`
+          :
+          ""
+        }
+
+        <hr>
+
+        <form onsubmit="sendQR(event,'${escapeAttr(o.id)}')">
+
+          <p><b>QR ـی eSIM:</b></p>
+
+          <input
+            name="qr"
+            type="file"
+            accept="image/*"
+            required
+          >
+
+          <input
+            name="activationCode"
+            placeholder="Activation Code"
+          >
+
+          <button type="submit">
+            ناردنی QR بۆ کڕیار
+          </button>
+
+        </form>
+
+      </div>
+
+      `).join("");
+
+  }catch(err){
+
+    error.textContent =
+      "پەیوەندی بە Backend ـەوە نەکرا: " + err.message;
+
+  }
 }
+
 async function sendQR(e,id){
- e.preventDefault(); const fd=new FormData(e.target);
- const r=await fetch("/api/admin/orders/"+id+"/qr",{method:"POST",headers:{"x-admin-key":KEY},body:fd});
- const d=await r.json(); if(!r.ok){alert(d.error||"هەڵە");return}
- alert("QR Code نێردرا و Order ـەکە ئامادە کرا.");
- loadOrders();
+
+  e.preventDefault();
+
+  const form = e.target;
+  const fd = new FormData(form);
+
+  try{
+
+    const r = await fetch(
+      API + "/api/admin/orders/" +
+      encodeURIComponent(id) +
+      "/qr",
+      {
+        method:"POST",
+        headers:{
+          "x-admin-key":KEY
+        },
+        body:fd
+      }
+    );
+
+    const d = await r.json();
+
+    if(!r.ok){
+
+      alert(d.error || "هەڵەیەک ڕوویدا.");
+      return;
+    }
+
+    alert(
+      "QR Code نێردرا و Order ـەکە ئامادە کرا."
+    );
+
+    loadOrders();
+
+  }catch(err){
+
+    alert(
+      "پەیوەندی بە Backend نەکرا: " +
+      err.message
+    );
+
+  }
 }
-</script></body></html>
+
+function escapeHtml(value){
+
+  return String(value)
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+
+function escapeAttr(value){
+  return String(value)
+    .replaceAll("\\","\\\\")
+    .replaceAll("'","\\'");
+}
+
+</script>
+
+</body>
+</html>
