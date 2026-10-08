@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ku" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0862bd">
+<link rel="manifest" href="/manifest.json">
+<title>FirstESIM — Admin Panel</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f4f7fb;color:#172033;font-family:Arial,"Noto Sans Arabic",sans-serif}
+.wrap{max-width:900px;margin:auto;padding:18px}
+.card{background:#fff;border-radius:20px;padding:18px;margin:14px 0;box-shadow:0 5px 20px rgba(0,0,0,.06)}
+h1{margin:0;font-size:24px}h2{margin:0}
+input,button,select{font:inherit}
+input[type=password],input[type=text],input[type=file],select{width:100%;padding:13px;border:1px solid #dce3ed;border-radius:12px;background:#fff}
+button{border:0;border-radius:12px;padding:12px 15px;font-weight:900;cursor:pointer}
+.primary{background:#0862bd;color:#fff}.green{background:#16a05d;color:#fff}.red{background:#e53935;color:#fff}.gray{background:#eef2f7;color:#172033}
+.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1}
+.small{font-size:12px;color:#687386}
+.status{display:inline-block;padding:6px 10px;border-radius:999px;background:#edf3ff;font-size:12px;font-weight:900}
+.order{border:1px solid #e5eaf1;border-radius:17px;padding:15px;margin-top:12px}
+.order h3{margin:0 0 8px}.line{margin:6px 0;font-size:13px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.actions button{flex:1;min-width:120px}
+.notice{padding:12px;border-radius:12px;margin-top:10px;font-size:13px;font-weight:800}
+.ok{background:#e8f8ef;color:#11743f}.err{background:#fff0f0;color:#b51f1f}.warn{background:#fff8df;color:#805d00}
+a{color:#0862bd;font-weight:800;text-decoration:none}
+.receipt{display:inline-block;margin-top:7px}.qrbox{margin-top:10px;padding:12px;background:#f7f9fc;border-radius:12px}
+img.preview{max-width:180px;max-height:180px;border-radius:12px;margin-top:8px;display:block}
+hr{border:0;border-top:1px solid #edf0f5;margin:15px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="card">
+<h1>FirstESIM — Admin Panel</h1>
+<div class="small" style="margin-top:6px">بەڕێوەبردنی Order ـەکان و QR Code</div>
+<label style="display:block;margin-top:15px;font-weight:900">Admin Key</label>
+<input id="key" type="password" placeholder="Admin Key">
+<div class="row" style="margin-top:10px">
+<button class="primary" onclick="loadOrders()">Orders ـەکان بار بکە</button>
+<button class="green" onclick="enableNotifications()">Enable Notifications 🔔</button>
+</div>
+<div id="message"></div>
+</div>
+<div class="card">
+<div style="display:flex;justify-content:space-between;align-items:center">
+<h2>Orders</h2><b id="count">0</b>
+</div>
+<div id="orders"></div>
+</div>
+</div>
+<script>
+const API=location.origin;
+const keyInput=document.getElementById('key');
+keyInput.value=localStorage.getItem('firstesim_admin_key')||'';
+
+function setMessage(text,type='ok'){
+ document.getElementById('message').innerHTML='<div class="notice '+type+'">'+text+'</div>';
+}
+function headers(){return {'x-admin-key':keyInput.value}}
+function saveKey(){localStorage.setItem('firstesim_admin_key',keyInput.value)}
+function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
+function fmt(v){return v?new Date(v).toLocaleString():'—'}
+function statusText(s){return({waiting_payment_check:'چاوەڕوانی پشکنینی پارەدان',payment_confirmed:'پارە پشتڕاست کراوە',esim_ready:'QR ئامادەیە',completed:'تەواو کراوە',cancelled:'هەڵوەشێنراوەتەوە'})[s]||s||'نادیار'}
+
+async function loadOrders(silent=false){
+ saveKey();
+ if(!keyInput.value){setMessage('تکایە Admin Key بنووسە.','err');return}
+ try{
+  const r=await fetch(API+'/api/admin/orders',{headers:headers()});
+  const d=await r.json();if(!r.ok)throw new Error(d.error||'Unauthorized');
+  renderOrders(d.orders||[]);
+  if(!silent)setMessage('Orders بە سەرکەوتوویی بارکرا.','ok');
+ }catch(e){setMessage('کێشە: '+e.message,'err')}
+}
+
+function renderOrders(list){
+ document.getElementById('count').textContent=list.length;
+ if(!list.length){document.getElementById('orders').innerHTML='<div class="notice warn">هیچ Order ـێک نییە.</div>';return}
+ document.getElementById('orders').innerHTML=list.map(o=>{
+  const receipt=o.receiptUrl?(API+o.receiptUrl):'';
+  const qr=o.qrUrl?(o.qrUrl.startsWith('http')?o.qrUrl:API+o.qrUrl):'';
+  return `<div class="order">
+  <h3>🆔 ${esc(o.id)}</h3>
+  <div class="line"><b>🌍 وڵات:</b> ${esc(o.country)}</div>
+  <div class="line"><b>📦 پلان:</b> ${esc(o.plan)}</div>
+  <div class="line"><b>💰 نرخ:</b> ${esc(o.price)}</div>
+  <div class="line"><b>💳 پارەدان:</b> ${esc(o.payment)}</div>
+  <div class="line"><b>📅 Order دروست کرا:</b> ${fmt(o.createdAt)}</div>
+  <div class="line"><b>💵 پارە پشتڕاست کرا:</b> ${fmt(o.paymentConfirmedAt)}</div>
+  <div class="line"><b>📷 QR Upload کرا:</b> ${fmt(o.qrUploadedAt)}</div>
+  <div class="line"><span class="status">${esc(statusText(o.status))}</span></div>
+  ${receipt?`<div class="receipt">📎 <a href="${receipt}" target="_blank" rel="noopener">بینینی Receipt</a></div>`:''}
+  ${qr?`<div class="qrbox"><b>QR ـی ئامادە:</b><img class="preview" src="${qr}" alt="QR"><a href="${qr}" target="_blank" rel="noopener">کردنەوەی QR</a></div>`:''}
+  <hr>
+  <select id="status-${esc(o.id)}">
+   <option value="waiting_payment_check" ${o.status==='waiting_payment_check'?'selected':''}>چاوەڕوانی پارە</option>
+   <option value="payment_confirmed" ${o.status==='payment_confirmed'?'selected':''}>پارە پشتڕاستە</option>
+   <option value="completed" ${o.status==='completed'?'selected':''}>تەواو</option>
+   <option value="cancelled" ${o.status==='cancelled'?'selected':''}>هەڵوەشاندنەوە</option>
+  </select>
+  <div style="margin-top:10px"><label style="font-weight:900;font-size:13px">QR Code upload بکە</label>
+  <input id="qr-${esc(o.id)}" type="file" accept="image/*,.png,.jpg,.jpeg"></div>
+  <div style="margin-top:10px"><label style="font-weight:900;font-size:13px">Activation Code</label>
+  <input id="code-${esc(o.id)}" type="text" value="${esc(o.activationCode||'')}" placeholder="Activation Code"></div>
+  <div class="actions">
+   <button class="green" onclick="confirmPayment('${esc(o.id)}')">پارە پشتڕاست بکە</button>
+   <button class="primary" onclick="uploadQR('${esc(o.id)}')">Upload QR</button>
+   <button class="gray" onclick="loadOrders(true)">نوێکردنەوە</button>
+   <button class="red" onclick="deleteOrder('${esc(o.id)}')">🗑️ سڕینەوە</button>
+  </div>
+  </div>`;
+ }).join('');
+}
+
+async function confirmPayment(id){await changeStatus(id,'payment_confirmed')}
+async function changeStatus(id,status){
+ try{
+  const r=await fetch(API+'/api/admin/orders/'+encodeURIComponent(id)+'/status',{
+   method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify({status})
+  });
+  const d=await r.json();if(!r.ok)throw new Error(d.error||'Status failed');
+  setMessage(id+': '+statusText(d.order.status),'ok');await loadOrders(true);
+ }catch(e){setMessage('کێشە: '+e.message,'err')}
+}
+
+async function uploadQR(id){
+ const file=document.getElementById('qr-'+id)?.files?.[0];
+ const code=document.getElementById('code-'+id)?.value||'';
+ if(!file){setMessage('تکایە فایلێکی QR هەڵبژێرە.','err');return}
+ const form=new FormData();form.append('qr',file);form.append('activationCode',code);
+ try{
+  const r=await fetch(API+'/api/admin/orders/'+encodeURIComponent(id)+'/qr',{method:'POST',headers:headers(),body:form});
+  const d=await r.json();if(!r.ok)throw new Error(d.error||'QR upload failed');
+  setMessage('✅ QR بۆ '+id+' upload کرا.','ok');await loadOrders(true);
+ }catch(e){setMessage('کێشە: '+e.message,'err')}
+}
+
+async function deleteOrder(id){
+ if(!confirm('دڵنیایت دەتەوێت Order ـی '+id+' بسڕیتەوە؟\n\nReceipt و QR ـەکەشی لە server دەسڕدرێتەوە.'))return;
+ try{
+  const r=await fetch(API+'/api/admin/orders/'+encodeURIComponent(id),{method:'DELETE',headers:headers()});
+  const d=await r.json();if(!r.ok)throw new Error(d.error||'Delete failed');
+  setMessage('🗑️ '+id+' سڕایەوە.','ok');await loadOrders(true);
+ }catch(e){setMessage('کێشە: '+e.message,'err')}
+}
+
+function urlBase64ToUint8Array(base64String){
+ const padding='='.repeat((4-base64String.length%4)%4);
+ const base64=(base64String+padding).replace(/-/g,'+').replace(/_/g,'/');
+ const rawData=atob(base64);
+ return Uint8Array.from([...rawData].map(c=>c.charCodeAt(0)));
+}
+
+async function enableNotifications(){
+ try{
+  if(!('serviceWorker' in navigator)||!('PushManager' in window))throw new Error('ئەم browser ـە Push Notification پشتگیری ناکات.');
+  if(!keyInput.value)throw new Error('سەرەتا Admin Key بنووسە.');
+  saveKey();
+  const permission=await Notification.requestPermission();
+  if(permission!=='granted')throw new Error('Notification ڕێگەپێنەدرا.');
+  const registration=await navigator.serviceWorker.register('/sw-admin.js',{scope:'/'});
+  await navigator.serviceWorker.ready;
+  const r=await fetch(API+'/api/admin/push/public-key',{headers:headers()});
+  const d=await r.json();if(!r.ok)throw new Error(d.error||'Public key failed');
+  let subscription=await registration.pushManager.getSubscription();
+  if(!subscription)subscription=await registration.pushManager.subscribe({
+   userVisibleOnly:true,applicationServerKey:urlBase64ToUint8Array(d.publicKey)
+  });
+  const subJson=subscription.toJSON();
+  if(!subJson.endpoint||!subJson.keys?.p256dh||!subJson.keys?.auth)throw new Error('Browser Push subscription ـەکە تەواو نییە.');
+  const save=await fetch(API+'/api/admin/push/subscribe',{
+   method:'POST',headers:{...headers(),'Content-Type':'application/json'},
+   body:JSON.stringify({subscription:subJson})
+  });
+  const saved=await save.json();if(!save.ok)throw new Error(saved.error||'Invalid subscription');
+  setMessage('🔔 Push Notification چالاک کرا. ئێستا Order ـی نوێ بێت ئاگادارت دەکاتەوە.','ok');
+ }catch(e){console.error(e);setMessage('کێشە: '+e.message,'err')}
+}
+
+async function openNotificationOrder(){
+ const id=new URLSearchParams(location.search).get('order');
+ await loadOrders(true);
+ if(id)setTimeout(()=>{const el=document.getElementById('status-'+id);if(el)el.scrollIntoView({behavior:'smooth',block:'center'})},300);
+}
+openNotificationOrder();
+</script>
+</body>
+</html>
