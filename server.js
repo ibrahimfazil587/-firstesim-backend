@@ -1,443 +1,140 @@
-const express = require("express");
-const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
-const crypto = require("crypto");
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const webpush = require('web-push');
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
+const ADMIN_KEY = process.env.ADMIN_KEY || 'CHANGE_THIS_ADMIN_KEY';
+const publicDir = path.join(__dirname, 'public');
+const dataDir = path.join(__dirname, 'data');
+const uploadsDir = path.join(__dirname, 'uploads');
+fs.mkdirSync(publicDir, { recursive:true });
+fs.mkdirSync(dataDir, { recursive:true });
+fs.mkdirSync(uploadsDir, { recursive:true });
 
-// ===============================
-// Folders
-// ===============================
+const dbFile = path.join(dataDir,'orders.json');
+const pushFile = path.join(dataDir,'push-subscriptions.json');
+const vapidFile = path.join(dataDir,'vapid.json');
+if(!fs.existsSync(dbFile)) fs.writeFileSync(dbFile,'[]');
+if(!fs.existsSync(pushFile)) fs.writeFileSync(pushFile,'[]');
 
-const dataDir = path.join(__dirname, "data");
-const uploadsDir = path.join(__dirname, "uploads");
-const publicDir = path.join(__dirname, "public");
+function readJson(file,fallback){ try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch(_){return fallback;} }
+function writeJson(file,value){ fs.writeFileSync(file,JSON.stringify(value,null,2)); }
+function readOrders(){return readJson(dbFile,[]);}
+function saveOrders(v){writeJson(dbFile,v);}
+function readSubs(){return readJson(pushFile,[]);}
+function saveSubs(v){writeJson(pushFile,v);}
 
-fs.mkdirSync(dataDir, { recursive: true });
-fs.mkdirSync(uploadsDir, { recursive: true });
-fs.mkdirSync(publicDir, { recursive: true });
-
-const ordersFile = path.join(dataDir, "orders.json");
-
-if (!fs.existsSync(ordersFile)) {
-  fs.writeFileSync(ordersFile, "[]", "utf8");
+let vapid = readJson(vapidFile,null);
+if(!vapid || !vapid.publicKey || !vapid.privateKey){
+  vapid = webpush.generateVAPIDKeys();
+  writeJson(vapidFile,vapid);
 }
+webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:admin@firstesim.net', vapid.publicKey, vapid.privateKey);
 
-// ===============================
-// Middleware
-// ===============================
-
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
-
-// CORS
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-
-  if (
-    origin === "https://firstesim.net" ||
-    origin === "https://www.firstesim.net"
-  ) {
-    res.header("Access-Control-Allow-Origin", origin);
+app.use(express.json());
+app.use(express.urlencoded({extended:true}));
+app.use((req,res,next)=>{
+  const origin=req.headers.origin;
+  if(origin==='https://firstesim.net' || origin==='https://www.firstesim.net' || origin?.endsWith('.github.io')){
+    res.setHeader('Access-Control-Allow-Origin',origin);
+    res.setHeader('Vary','Origin');
   }
-
-  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Content-Type, x-admin-key"
-  );
-
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-
+  res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers','Content-Type,x-admin-key');
+  if(req.method==='OPTIONS') return res.sendStatus(204);
   next();
 });
-
-// Static files
-app.use("/uploads", express.static(uploadsDir));
 app.use(express.static(publicDir));
+app.use('/uploads',express.static(uploadsDir));
 
-// ===============================
-// Multer upload
-// ===============================
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadsDir);
-  },
-
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname || "").toLowerCase();
-
-    const name =
-      Date.now() +
-      "-" +
-      crypto.randomBytes(6).toString("hex") +
-      ext;
-
-    cb(null, name);
+const storage=multer.diskStorage({
+  destination:uploadsDir,
+  filename:(req,file,cb)=>{
+    const ext=path.extname(file.originalname);
+    cb(null,Date.now()+'-'+crypto.randomBytes(5).toString('hex')+ext);
   }
 });
-
-const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 10 * 1024 * 1024
-  }
-});
-
-// ===============================
-// Helpers
-// ===============================
-
-function readOrders() {
-  try {
-    const raw = fs.readFileSync(ordersFile, "utf8");
-
-    if (!raw.trim()) {
-      return [];
-    }
-
-    return JSON.parse(raw);
-  } catch (error) {
-    console.error("READ ORDERS ERROR:", error);
-    return [];
-  }
-}
-
-function writeOrders(orders) {
-  fs.writeFileSync(
-    ordersFile,
-    JSON.stringify(orders, null, 2),
-    "utf8"
-  );
-}
-
-function getBaseUrl(req) {
-  return `${req.protocol}://${req.get("host")}`;
-}
-
-// ===============================
-// Health check
-// ===============================
-
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    service: "FirstESIM API",
-    status: "online"
-  });
-});
-
-app.get("/api/health", (req, res) => {
-  res.json({
-    ok: true,
-    status: "online"
-  });
-});
-
-// ===============================
-// CREATE ORDER
-// ===============================
-
-app.post(
-  "/api/orders",
-  upload.single("receipt"),
-  (req, res) => {
-    try {
-      const {
-        customerName = "",
-        customerPhone = "",
-        country = "",
-        plan = "",
-        price = "",
-        payment = ""
-      } = req.body;
-
-      if (!country || !plan || !payment) {
-        return res.status(400).json({
-          ok: false,
-          error: "Missing order information"
-        });
-      }
-
-      if (!req.file) {
-        return res.status(400).json({
-          ok: false,
-          error: "Receipt is required"
-        });
-      }
-
-      const orders = readOrders();
-
-      const id =
-        "ESIM-" +
-        Date.now() +
-        "-" +
-        crypto.randomBytes(3).toString("hex").toUpperCase();
-
-      const receiptUrl =
-        getBaseUrl(req) +
-        "/uploads/" +
-        req.file.filename;
-
-      const order = {
-        id,
-
-        customerName,
-        customerPhone,
-
-        country,
-        plan,
-        price,
-        payment,
-
-        receiptUrl,
-
-        status: "waiting_payment_check",
-
-        qrUrl: "",
-        activationCode: "",
-
-        notes: "",
-
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-
-      orders.push(order);
-      writeOrders(orders);
-
-      console.log("NEW ORDER:", id);
-
-      return res.status(201).json({
-        ok: true,
-        order
-      });
-    } catch (error) {
-      console.error("CREATE ORDER ERROR:", error);
-
-      return res.status(500).json({
-        ok: false,
-        error: "Could not create order"
-      });
-    }
-  }
-);
-
-// ===============================
-// GET CUSTOMER ORDER
-// ===============================
-
-app.get("/api/orders/:id", (req, res) => {
-  try {
-    const orders = readOrders();
-
-    const order = orders.find(
-      (item) => item.id === req.params.id
-    );
-
-    if (!order) {
-      return res.status(404).json({
-        ok: false,
-        error: "Order not found"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      order
-    });
-  } catch (error) {
-    console.error("GET ORDER ERROR:", error);
-
-    return res.status(500).json({
-      ok: false,
-      error: "Could not read order"
-    });
-  }
-});
-
-// ===============================
-// ADMIN AUTH
-// ===============================
-
-function adminAuth(req, res, next) {
-  const adminKey = process.env.ADMIN_KEY;
-
-  if (!adminKey) {
-    return res.status(500).json({
-      ok: false,
-      error: "ADMIN_KEY is not configured"
-    });
-  }
-
-  const key = req.headers["x-admin-key"];
-
-  if (!key || key !== adminKey) {
-    return res.status(401).json({
-      ok: false,
-      error: "Unauthorized"
-    });
-  }
-
+const upload=multer({storage});
+function adminOnly(req,res,next){
+  if(req.headers['x-admin-key']!==ADMIN_KEY) return res.status(401).json({error:'Unauthorized'});
   next();
 }
 
-// ===============================
-// ADMIN - GET ORDERS
-// ===============================
-
-app.get(
-  "/api/admin/orders",
-  adminAuth,
-  (req, res) => {
-    try {
-      const orders = readOrders();
-
-      return res.json({
-        ok: true,
-        orders: orders.reverse()
-      });
-    } catch (error) {
-      console.error("ADMIN ORDERS ERROR:", error);
-
-      return res.status(500).json({
-        ok: false,
-        error: "Could not read orders"
-      });
-    }
+async function notifyAdmins(order){
+  const subs=readSubs();
+  if(!subs.length) return;
+  const payload=JSON.stringify({
+    title:'FirstESIM — Order نوێ 🔔',
+    body:`${order.id} — ${order.country} — ${order.plan} — ${order.price}`,
+    url:'/admin.html',
+    orderId:order.id,
+    tag:'order-'+order.id
+  });
+  const keep=[];
+  for(const sub of subs){
+    try{ await webpush.sendNotification(sub,payload); keep.push(sub); }
+    catch(err){ if(err.statusCode!==404 && err.statusCode!==410) keep.push(sub); }
   }
-);
+  saveSubs(keep);
+}
 
-// ===============================
-// ADMIN - UPDATE STATUS
-// ===============================
-
-app.post(
-  "/api/admin/orders/:id/status",
-  adminAuth,
-  (req, res) => {
-    try {
-      const { status } = req.body;
-
-      if (!status) {
-        return res.status(400).json({
-          ok: false,
-          error: "Status is required"
-        });
-      }
-
-      const orders = readOrders();
-
-      const index = orders.findIndex(
-        (item) => item.id === req.params.id
-      );
-
-      if (index === -1) {
-        return res.status(404).json({
-          ok: false,
-          error: "Order not found"
-        });
-      }
-
-      orders[index].status = status;
-      orders[index].updatedAt = new Date().toISOString();
-
-      writeOrders(orders);
-
-      return res.json({
-        ok: true,
-        order: orders[index]
-      });
-    } catch (error) {
-      console.error("STATUS UPDATE ERROR:", error);
-
-      return res.status(500).json({
-        ok: false,
-        error: "Could not update status"
-      });
-    }
-  }
-);
-
-// ===============================
-// ADMIN - UPLOAD QR
-// ===============================
-
-app.post(
-  "/api/admin/orders/:id/qr",
-  adminAuth,
-  upload.single("qr"),
-  (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({
-          ok: false,
-          error: "QR file is required"
-        });
-      }
-
-      const orders = readOrders();
-
-      const index = orders.findIndex(
-        (item) => item.id === req.params.id
-      );
-
-      if (index === -1) {
-        return res.status(404).json({
-          ok: false,
-          error: "Order not found"
-        });
-      }
-
-      const qrUrl =
-        getBaseUrl(req) +
-        "/uploads/" +
-        req.file.filename;
-
-      orders[index].qrUrl = qrUrl;
-
-      orders[index].activationCode =
-        req.body.activationCode || "";
-
-      orders[index].status = "esim_ready";
-
-      orders[index].updatedAt =
-        new Date().toISOString();
-
-      writeOrders(orders);
-
-      console.log(
-        "QR READY FOR ORDER:",
-        orders[index].id
-      );
-
-      return res.json({
-        ok: true,
-        order: orders[index]
-      });
-    } catch (error) {
-      console.error("QR UPLOAD ERROR:", error);
-
-      return res.status(500).json({
-        ok: false,
-        error: "Could not upload QR"
-      });
-    }
-  }
-);
-
-// ===============================
-// START SERVER
-// ===============================
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("=================================");
-  console.log("FirstESIM API is running");
-  console.log("PORT:", PORT);
-  console.log("=================================");
+app.get('/api/health',(req,res)=>res.json({ok:true}));
+app.get('/api/admin/push/public-key',adminOnly,(req,res)=>res.json({ok:true,publicKey:vapid.publicKey}));
+app.post('/api/admin/push/subscribe',adminOnly,(req,res)=>{
+  const sub=req.body?.subscription;
+  if(!sub || !sub.endpoint) return res.status(400).json({error:'Invalid subscription'});
+  const subs=readSubs();
+  const idx=subs.findIndex(x=>x.endpoint===sub.endpoint);
+  if(idx>=0) subs[idx]=sub; else subs.push(sub);
+  saveSubs(subs);
+  res.json({ok:true});
 });
+app.post('/api/admin/push/unsubscribe',adminOnly,(req,res)=>{
+  const endpoint=req.body?.endpoint;
+  saveSubs(readSubs().filter(x=>x.endpoint!==endpoint));
+  res.json({ok:true});
+});
+
+app.post('/api/orders',upload.single('receipt'),async(req,res)=>{
+  const orders=readOrders();
+  const order={
+    id:'FE-'+Date.now().toString().slice(-8),
+    createdAt:new Date().toISOString(),
+    customerName:req.body.customerName||'', customerPhone:req.body.customerPhone||'',
+    country:req.body.country||'', plan:req.body.plan||'', price:req.body.price||'',
+    payment:req.body.payment||'', receiptUrl:req.file?'/uploads/'+req.file.filename:'',
+    status:'waiting_payment_check', qrUrl:'', activationCode:'', notes:''
+  };
+  orders.unshift(order); saveOrders(orders);
+  res.json({ok:true,order});
+  notifyAdmins(order).catch(e=>console.error('push notification error',e));
+});
+
+app.get('/api/orders/:id',(req,res)=>{
+  const order=readOrders().find(x=>x.id===req.params.id);
+  if(!order)return res.status(404).json({error:'Order not found'});
+  res.json({ok:true,order});
+});
+app.get('/api/admin/orders',adminOnly,(req,res)=>res.json({ok:true,orders:readOrders()}));
+app.post('/api/admin/orders/:id/status',adminOnly,(req,res)=>{
+  const allowed=['waiting_payment_check','payment_confirmed','esim_ready','completed','cancelled'];
+  const orders=readOrders(); const order=orders.find(x=>x.id===req.params.id);
+  if(!order)return res.status(404).json({error:'Order not found'});
+  if(!allowed.includes(req.body.status))return res.status(400).json({error:'Invalid status'});
+  order.status=req.body.status; order.updatedAt=new Date().toISOString(); saveOrders(orders);
+  res.json({ok:true,order});
+});
+app.post('/api/admin/orders/:id/qr',adminOnly,upload.single('qr'),(req,res)=>{
+  const orders=readOrders(); const order=orders.find(x=>x.id===req.params.id);
+  if(!order)return res.status(404).json({error:'Order not found'});
+  if(req.file)order.qrUrl='/uploads/'+req.file.filename;
+  if(req.body.activationCode)order.activationCode=req.body.activationCode;
+  order.status='esim_ready'; order.updatedAt=new Date().toISOString(); saveOrders(orders);
+  res.json({ok:true,order});
+});
+
+app.listen(PORT,'0.0.0.0',()=>console.log(`FirstESIM backend running on ${PORT}`));
