@@ -17,9 +17,11 @@ fs.mkdirSync(uploadsDir, { recursive:true });
 
 const dbFile = path.join(dataDir,'orders.json');
 const pushFile = path.join(dataDir,'push-subscriptions.json');
+const customerPushFile = path.join(dataDir,'customer-push-subscriptions.json');
 const vapidFile = path.join(dataDir,'vapid.json');
 if(!fs.existsSync(dbFile)) fs.writeFileSync(dbFile,'[]');
 if(!fs.existsSync(pushFile)) fs.writeFileSync(pushFile,'[]');
+if(!fs.existsSync(customerPushFile)) fs.writeFileSync(customerPushFile,'[]');
 
 function readJson(file,fallback){ try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch(_){return fallback;} }
 function writeJson(file,value){ fs.writeFileSync(file,JSON.stringify(value,null,2)); }
@@ -27,6 +29,8 @@ function readOrders(){return readJson(dbFile,[]);}
 function saveOrders(v){writeJson(dbFile,v);}
 function readSubs(){return readJson(pushFile,[]);}
 function saveSubs(v){writeJson(pushFile,v);}
+function readCustomerSubs(){return readJson(customerPushFile,[]);}
+function saveCustomerSubs(v){writeJson(customerPushFile,v);}
 
 let vapid = readJson(vapidFile,null);
 if(!vapid || !vapid.publicKey || !vapid.privateKey){
@@ -64,26 +68,70 @@ function adminOnly(req,res,next){
   next();
 }
 
-async function notifyAdmins(order){
-  const subs=readSubs();
-  if(!subs.length) return;
-  const payload=JSON.stringify({
-    title:'FirstESIM — Order نوێ 🔔',
-    body:`${order.id} — ${order.country} — ${order.plan} — ${order.price}`,
-    url:'/admin.html',
-    orderId:order.id,
-    tag:'order-'+order.id
-  });
-  const keep=[];
-  for(const sub of subs){
-    try{ await webpush.sendNotification(sub,payload); keep.push(sub); }
-    catch(err){ if(err.statusCode!==404 && err.statusCode!==410) keep.push(sub); }
+app.get('/api/customer/push/public-key',(req,res)=>{
+  res.json({ok:true,publicKey:vapid.publicKey});
+});
+
+app.post('/api/customer/push/subscribe',(req,res)=>{
+  const orderId=req.body?.orderId;
+  const sub=req.body?.subscription;
+
+  if(!orderId || !sub || typeof sub!=='object' || !sub.endpoint ||
+     !sub.keys || !sub.keys.p256dh || !sub.keys.auth){
+    return res.status(400).json({error:'Invalid customer subscription'});
   }
-  saveSubs(keep);
+
+  const orders=readOrders();
+  const order=orders.find(x=>x.id===orderId);
+  if(!order)return res.status(404).json({error:'Order not found'});
+
+  const subs=readCustomerSubs();
+  const clean={
+    orderId,
+    endpoint:sub.endpoint,
+    expirationTime:sub.expirationTime ?? null,
+    keys:{p256dh:sub.keys.p256dh,auth:sub.keys.auth}
+  };
+
+  const idx=subs.findIndex(x=>x.endpoint===clean.endpoint);
+  if(idx>=0)subs[idx]=clean;else subs.push(clean);
+  saveCustomerSubs(subs);
+
+  res.json({ok:true});
+});
+
+async function notifyCustomers(order){
+  const all=readCustomerSubs();
+  const subs=all.filter(x=>x.orderId===order.id);
+  if(!subs.length)return;
+
+  const payload=JSON.stringify({
+    title:'FirstESIM — QR ـەکەت ئامادەیە 🔔',
+    body:`${order.country} — ${order.plan}`,
+    url:`https://firstesim.net/FirstESIM-App/?order=${encodeURIComponent(order.id)}`,
+    orderId:order.id,
+    tag:'qr-'+order.id
+  });
+
+  const keep=[];
+  for(const sub of all){
+    if(sub.orderId!==order.id){keep.push(sub);continue;}
+    try{
+      await webpush.sendNotification(
+        {endpoint:sub.endpoint,expirationTime:sub.expirationTime,keys:sub.keys},
+        payload
+      );
+    }catch(err){
+      console.error('Customer push error:',err.statusCode||'',err.message||err);
+      if(err.statusCode!==404 && err.statusCode!==410)keep.push(sub);
+    }
+  }
+  saveCustomerSubs(keep);
 }
 
 app.get('/api/health',(req,res)=>res.json({ok:true}));
 app.get('/api/admin/push/public-key',adminOnly,(req,res)=>res.json({ok:true,publicKey:vapid.publicKey}));
+
 app.post('/api/admin/push/subscribe',adminOnly,(req,res)=>{
   const sub=req.body?.subscription;
   if(!sub || !sub.endpoint) return res.status(400).json({error:'Invalid subscription'});
@@ -93,6 +141,7 @@ app.post('/api/admin/push/subscribe',adminOnly,(req,res)=>{
   saveSubs(subs);
   res.json({ok:true});
 });
+
 app.post('/api/admin/push/unsubscribe',adminOnly,(req,res)=>{
   const endpoint=req.body?.endpoint;
   saveSubs(readSubs().filter(x=>x.endpoint!==endpoint));
@@ -104,14 +153,21 @@ app.post('/api/orders',upload.single('receipt'),async(req,res)=>{
   const order={
     id:'FE-'+Date.now().toString().slice(-8),
     createdAt:new Date().toISOString(),
-    customerName:req.body.customerName||'', customerPhone:req.body.customerPhone||'',
-    country:req.body.country||'', plan:req.body.plan||'', price:req.body.price||'',
-    payment:req.body.payment||'', receiptUrl:req.file?'/uploads/'+req.file.filename:'',
-    status:'waiting_payment_check', qrUrl:'', activationCode:'', notes:''
+    customerName:req.body.customerName||'',
+    customerPhone:req.body.customerPhone||'',
+    country:req.body.country||'',
+    plan:req.body.plan||'',
+    price:req.body.price||'',
+    payment:req.body.payment||'',
+    receiptUrl:req.file?'/uploads/'+req.file.filename:'',
+    status:'waiting_payment_check',
+    qrUrl:'',
+    activationCode:'',
+    notes:''
   };
-  orders.unshift(order); saveOrders(orders);
+  orders.unshift(order);
+  saveOrders(orders);
   res.json({ok:true,order});
-  notifyAdmins(order).catch(e=>console.error('push notification error',e));
 });
 
 app.get('/api/orders/:id',(req,res)=>{
@@ -119,22 +175,59 @@ app.get('/api/orders/:id',(req,res)=>{
   if(!order)return res.status(404).json({error:'Order not found'});
   res.json({ok:true,order});
 });
-app.get('/api/admin/orders',adminOnly,(req,res)=>res.json({ok:true,orders:readOrders()}));
+
+app.get('/api/admin/orders',adminOnly,(req,res)=>{
+  res.json({ok:true,orders:readOrders()});
+});
+
 app.post('/api/admin/orders/:id/status',adminOnly,(req,res)=>{
   const allowed=['waiting_payment_check','payment_confirmed','esim_ready','completed','cancelled'];
-  const orders=readOrders(); const order=orders.find(x=>x.id===req.params.id);
+  const orders=readOrders();
+  const order=orders.find(x=>x.id===req.params.id);
   if(!order)return res.status(404).json({error:'Order not found'});
   if(!allowed.includes(req.body.status))return res.status(400).json({error:'Invalid status'});
-  order.status=req.body.status; order.updatedAt=new Date().toISOString(); saveOrders(orders);
+  order.status=req.body.status;
+  order.updatedAt=new Date().toISOString();
+  saveOrders(orders);
   res.json({ok:true,order});
 });
+
 app.post('/api/admin/orders/:id/qr',adminOnly,upload.single('qr'),(req,res)=>{
-  const orders=readOrders(); const order=orders.find(x=>x.id===req.params.id);
+  const orders=readOrders();
+  const order=orders.find(x=>x.id===req.params.id);
   if(!order)return res.status(404).json({error:'Order not found'});
-  if(req.file)order.qrUrl='/uploads/'+req.file.filename;
+
+  if(req.file){
+    order.qrUrl='/uploads/'+req.file.filename;
+    order.qrUploadedAt=new Date().toISOString();
+  }
+
   if(req.body.activationCode)order.activationCode=req.body.activationCode;
-  order.status='esim_ready'; order.updatedAt=new Date().toISOString(); saveOrders(orders);
+  order.status='esim_ready';
+  order.updatedAt=new Date().toISOString();
+  saveOrders(orders);
+
   res.json({ok:true,order});
+  notifyCustomers(order).catch(e=>console.error('customer push notification error',e));
+});
+
+app.delete('/api/admin/orders/:id',adminOnly,(req,res)=>{
+  const orders=readOrders();
+  const index=orders.findIndex(x=>x.id===req.params.id);
+  if(index===-1)return res.status(404).json({error:'Order not found'});
+
+  const [order]=orders.splice(index,1);
+  saveOrders(orders);
+
+  for(const url of [order.receiptUrl,order.qrUrl]){
+    if(!url || !url.startsWith('/uploads/')) continue;
+    const file=path.join(uploadsDir,path.basename(url));
+    try{
+      if(fs.existsSync(file))fs.unlinkSync(file);
+    }catch(_){}
+  }
+
+  res.json({ok:true});
 });
 
 app.listen(PORT,'0.0.0.0',()=>console.log(`FirstESIM backend running on ${PORT}`));
