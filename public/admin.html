@@ -2,321 +2,97 @@
 <html lang="ku" dir="rtl">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FirstESIM Admin</title>
-
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0869c9">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="FirstESIM Admin">
+<title>FirstESIM — Admin Panel</title>
 <style>
-body{
-  font-family:Arial;
-  background:#f4f7fb;
-  margin:0;
-  color:#172033;
-}
-.wrap{
-  max-width:900px;
-  margin:auto;
-  padding:20px;
-}
-h1{
-  color:#0862bd;
-}
-.box,.order{
-  background:#fff;
-  border-radius:18px;
-  padding:16px;
-  margin:12px 0;
-  box-shadow:0 5px 20px #0001;
-}
-input,select,button{
-  padding:12px;
-  border-radius:10px;
-  border:1px solid #ddd;
-  margin:5px;
-  box-sizing:border-box;
-}
-input{
-  min-width:220px;
-}
-button{
-  background:#0862bd;
-  color:white;
-  border:0;
-  font-weight:800;
-  cursor:pointer;
-}
-.status{
-  padding:5px 9px;
-  border-radius:10px;
-  background:#eef6ff;
-}
-.qr{
-  max-width:180px;
-  display:block;
-  margin:10px 0;
-}
-#error{
-  color:#c62828;
-  font-weight:bold;
-  margin:10px 0;
-}
-#success{
-  color:#16803c;
-  font-weight:bold;
-  margin:10px 0;
-}
+*{box-sizing:border-box}body{margin:0;background:#f4f8fd;color:#172033;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
+button,input,select{font:inherit}.wrap{max-width:900px;margin:auto;padding:22px 14px 60px}
+h1{color:#0869c9;text-align:center;font-size:38px;margin:20px 0 28px;font-weight:900}
+.card{background:#fff;border-radius:24px;padding:20px;margin:14px 0;box-shadow:0 5px 25px #0b376014}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+input,select{width:100%;border:2px solid #e0e5ec;border-radius:15px;padding:14px;outline:0;background:#fff}
+.btn{border:0;border-radius:14px;padding:13px 18px;font-weight:900;cursor:pointer}.blue{background:#0869c9;color:#fff}.green{background:#168a4b;color:#fff}.gray{background:#eef2f7;color:#27364c}
+.status{font-weight:900;margin-top:10px}.ok{color:#168a4b}.err{color:#d22}
+.order{border:1px solid #e5ebf2;border-radius:20px;padding:16px;margin:12px 0;background:#fbfdff}
+.order h3{margin:0 0 8px;color:#0869c9}.meta{line-height:1.9;color:#3c4b61}.actions{display:grid;gap:10px;margin-top:14px}
+.small{font-size:13px;color:#64748b}.badge{display:inline-block;border-radius:999px;padding:6px 10px;background:#eef5ff;color:#0869c9;font-weight:800}
+.notice{background:#fff8df;border:1px solid #f2df8b;padding:13px;border-radius:15px;line-height:1.7}
+@media(min-width:700px){.actions{grid-template-columns:1fr 1fr}}
 </style>
 </head>
-
 <body>
-
 <div class="wrap">
-
 <h1>FirstESIM — Admin Panel</h1>
-
-<div class="box">
-
-<input
-  id="key"
-  placeholder="Admin Key"
-  type="password"
->
-
-<button type="button" onclick="loadOrders()">
-کردنەوەی Orders
-</button>
-
-<div id="error"></div>
-<div id="success"></div>
-
+<section class="card">
+<div class="row"><input id="key" type="password" placeholder="Admin Key"><button class="btn blue" onclick="loadOrders()">Orders کردنەوە</button></div>
+<div id="loginStatus" class="status"></div>
+</section>
+<section class="card">
+<h2>🔔 Push Notification</h2>
+<p class="small">ئەم دوگمەیە لە iPhone ـی Admin تەنها یەکجار پێویستە.</p>
+<button id="pushBtn" class="btn green" onclick="enablePush()">🔔 Enable Notifications</button>
+<div id="pushStatus" class="status"></div>
+<div class="notice" style="margin-top:12px">کاتێک کڕیار Order ـێکی نوێ دروست دەکات، ئاگادارکردنەوە بۆ ئەم iPhone ـە دێت.</div>
+</section>
+<section class="card">
+<div class="row" style="justify-content:space-between"><h2 style="margin:0">Orders</h2><button class="btn gray" onclick="loadOrders()">🔄 نوێکردنەوە</button></div>
+<div id="orders">هیچ Order ـێک نییە.</div>
+</section>
 </div>
-
-<div id="orders"></div>
-
-</div>
-
 <script>
-
-const API = "https://firstesim-api.onrender.com";
-
-let KEY = "";
-
+const API="https://firstesim-api.onrender.com";
+let ADMIN_KEY=localStorage.getItem("firstesim_admin_key")||"";
+const $=id=>document.getElementById(id);
+$("key").value=ADMIN_KEY;
+function setStatus(id,msg,ok=false){$(id).textContent=msg||"";$(id).className="status "+(ok?"ok":"err")}
+function authHeaders(extra={}){return Object.assign({"x-admin-key":ADMIN_KEY},extra)}
+function esc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]))}
+function statusKu(s){return ({waiting_payment_check:"چاوەڕوانی پشکنینی پارەدان",payment_confirmed:"پارەدان پشتڕاست کرا",esim_ready:"eSIM ئامادەیە",completed:"تەواو کرا",cancelled:"هەڵوەشێنرایەوە"})[s]||s||"نادیار"}
 async function loadOrders(){
-
-  const error = document.getElementById("error");
-  const success = document.getElementById("success");
-
-  error.textContent = "";
-  success.textContent = "";
-
-  KEY = document.getElementById("key").value.trim();
-
-  if(!KEY){
-    error.textContent = "تکایە Admin Key بنووسە.";
-    return;
-  }
-
-  try{
-
-    const r = await fetch(API + "/api/admin/orders", {
-      method:"GET",
-      headers:{
-        "x-admin-key":KEY
-      }
-    });
-
-    const text = await r.text();
-
-    let d;
-
-    try{
-      d = JSON.parse(text);
-    }catch{
-      throw new Error("وەڵامی Backend دروست نییە.");
-    }
-
-    if(!r.ok){
-
-      if(r.status === 401){
-        error.textContent = "Admin Key هەڵەیە.";
-      }else{
-        error.textContent =
-          d.error || "هەڵەیەک ڕوویدا.";
-      }
-
-      return;
-    }
-
-    success.textContent =
-      "Orders بە سەرکەوتوویی کرانەوە.";
-
-    const orders = d.orders || [];
-
-    if(orders.length === 0){
-
-      document.getElementById("orders").innerHTML =
-        '<div class="box">هیچ Order ـێک نییە.</div>';
-
-      return;
-    }
-
-    document.getElementById("orders").innerHTML =
-      orders.map(o => `
-
-      <div class="order">
-
-        <h3>${escapeHtml(o.id || "")}</h3>
-
-        <p>
-          <b>وڵات:</b>
-          ${escapeHtml(o.country || "-")}
-        </p>
-
-        <p>
-          <b>پلان:</b>
-          ${escapeHtml(o.plan || "-")}
-        </p>
-
-        <p>
-          <b>نرخ:</b>
-          ${escapeHtml(o.price || "-")}
-        </p>
-
-        <p>
-          <b>کڕیار:</b>
-          ${escapeHtml(o.customerName || "-")}
-        </p>
-
-        <p>
-          <b>ژمارە:</b>
-          ${escapeHtml(o.customerPhone || "-")}
-        </p>
-
-        <p>
-          <b>پارەدان:</b>
-          ${escapeHtml(o.payment || "-")}
-        </p>
-
-        <p>
-          <b>دۆخ:</b>
-          <span class="status">
-            ${escapeHtml(o.status || "-")}
-          </span>
-        </p>
-
-        ${
-          o.receiptUrl
-          ?
-          `<p>
-            <a
-              href="${API}${o.receiptUrl}"
-              target="_blank"
-            >
-              بینینی پسوڵە
-            </a>
-          </p>`
-          :
-          ""
-        }
-
-        <hr>
-
-        <form onsubmit="sendQR(event,'${escapeAttr(o.id)}')">
-
-          <p><b>QR ـی eSIM:</b></p>
-
-          <input
-            name="qr"
-            type="file"
-            accept="image/*"
-            required
-          >
-
-          <input
-            name="activationCode"
-            placeholder="Activation Code"
-          >
-
-          <button type="submit">
-            ناردنی QR بۆ کڕیار
-          </button>
-
-        </form>
-
-      </div>
-
-      `).join("");
-
-  }catch(err){
-
-    error.textContent =
-      "پەیوەندی بە Backend ـەوە نەکرا: " + err.message;
-
-  }
+ ADMIN_KEY=$("key").value.trim(); if(!ADMIN_KEY){setStatus("loginStatus","تکایە Admin Key بنووسە.");return}
+ localStorage.setItem("firstesim_admin_key",ADMIN_KEY);
+ try{const r=await fetch(API+"/api/admin/orders",{headers:authHeaders()});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||"Unauthorized");setStatus("loginStatus","Orders بە سەرکەوتوویی بارکرا.",true);renderOrders(d.orders||[])}
+ catch(e){setStatus("loginStatus","کێشە: "+e.message)}
 }
-
-async function sendQR(e,id){
-
-  e.preventDefault();
-
-  const form = e.target;
-  const fd = new FormData(form);
-
-  try{
-
-    const r = await fetch(
-      API + "/api/admin/orders/" +
-      encodeURIComponent(id) +
-      "/qr",
-      {
-        method:"POST",
-        headers:{
-          "x-admin-key":KEY
-        },
-        body:fd
-      }
-    );
-
-    const d = await r.json();
-
-    if(!r.ok){
-
-      alert(d.error || "هەڵەیەک ڕوویدا.");
-      return;
-    }
-
-    alert(
-      "QR Code نێردرا و Order ـەکە ئامادە کرا."
-    );
-
-    loadOrders();
-
-  }catch(err){
-
-    alert(
-      "پەیوەندی بە Backend نەکرا: " +
-      err.message
-    );
-
-  }
+function renderOrders(list){
+ if(!list.length){$("orders").innerHTML='<div class="small" style="padding:25px 0;text-align:center">هیچ Order ـێک نییە.</div>';return}
+ $("orders").innerHTML=list.map(o=>`<article class="order">
+<h3>🆕 ${esc(o.id)}</h3><div class="meta">🌍 <b>وڵات:</b> ${esc(o.country)}<br>📦 <b>پلان:</b> ${esc(o.plan)}<br>💰 <b>نرخ:</b> ${esc(o.price)}<br>💳 <b>پارەدان:</b> ${esc(o.payment)}<br>📌 <b>دۆخ:</b> <span class="badge">${esc(statusKu(o.status))}</span></div>
+${o.receiptUrl?`<p><a href="${esc(API+o.receiptUrl)}" target="_blank">📎 بینینی پسوڵە</a></p>`:""}
+<div class="actions"><select id="status-${esc(o.id)}"><option value="waiting_payment_check">چاوەڕوانی پشکنینی پارەدان</option><option value="payment_confirmed">پارەدان پشتڕاست کرا</option><option value="esim_ready">eSIM ئامادەیە</option><option value="completed">تەواو کرا</option><option value="cancelled">هەڵوەشێنرایەوە</option></select>
+<button class="btn blue" onclick="changeStatus('${esc(o.id)}')">گۆڕینی دۆخ</button>
+<input id="qr-${esc(o.id)}" type="file" accept="image/*,.png,.jpg,.jpeg">
+<input id="code-${esc(o.id)}" type="text" placeholder="Activation Code (ئەگەر هەیە)">
+<button class="btn green" onclick="uploadQR('${esc(o.id)}')">📲 Upload QR و ناردن بۆ کڕیار</button></div></article>`).join("");
+ list.forEach(o=>{const s=$("status-"+o.id);if(s)s.value=o.status||"waiting_payment_check"})
 }
-
-function escapeHtml(value){
-
-  return String(value)
-    .replaceAll("&","&amp;")
-    .replaceAll("<","&lt;")
-    .replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;")
-    .replaceAll("'","&#039;");
+async function changeStatus(id){
+ try{const status=$("status-"+id).value;const r=await fetch(API+"/api/admin/orders/"+encodeURIComponent(id)+"/status",{method:"POST",headers:authHeaders({"Content-Type":"application/json"}),body:JSON.stringify({status})});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||"Status failed");await loadOrders()}catch(e){alert("کێشە: "+e.message)}
 }
-
-function escapeAttr(value){
-  return String(value)
-    .replaceAll("\\","\\\\")
-    .replaceAll("'","\\'");
+async function uploadQR(id){
+ const file=$("qr-"+id).files[0],code=$("code-"+id).value.trim();if(!file){alert("تکایە وێنەی QR هەڵبژێرە.");return}
+ const fd=new FormData();fd.append("qr",file);if(code)fd.append("activationCode",code);
+ try{const r=await fetch(API+"/api/admin/orders/"+encodeURIComponent(id)+"/qr",{method:"POST",headers:authHeaders(),body:fd});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||"QR upload failed");alert("QR بە سەرکەوتوویی نێردرا.");await loadOrders()}catch(e){alert("کێشە: "+e.message)}
 }
-
+function urlBase64ToUint8Array(s){const p="=".repeat((4-s.length%4)%4),b=(s+p).replace(/-/g,"+").replace(/_/g,"/"),r=atob(b);return Uint8Array.from([...r].map(c=>c.charCodeAt(0)))}
+async function enablePush(){
+ ADMIN_KEY=$("key").value.trim();if(!ADMIN_KEY){setStatus("pushStatus","سەرەتا Admin Key بنووسە.");return}
+ localStorage.setItem("firstesim_admin_key",ADMIN_KEY);
+ if(!("Notification"in window)||!("serviceWorker"in navigator)||!("PushManager"in window)){setStatus("pushStatus","Push Notification پشتگیری ناکرێت.");return}
+ try{
+  const permission=await Notification.requestPermission();if(permission!=="granted"){setStatus("pushStatus","Notification ڕێگەپێدان نەدرا.");return}
+  const reg=await navigator.serviceWorker.register("/sw-admin.js",{scope:"/"});await navigator.serviceWorker.ready;
+  const pk=await fetch(API+"/api/admin/push/public-key",{headers:authHeaders()});const kd=await pk.json().catch(()=>({}));if(!pk.ok||!kd.publicKey)throw new Error(kd.error||"Public key نەدۆزرایەوە.");
+  let sub=await reg.pushManager.getSubscription();if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlBase64ToUint8Array(kd.publicKey)});
+  const sr=await fetch(API+"/api/admin/push/subscribe",{method:"POST",headers:authHeaders({"Content-Type":"application/json"}),body:JSON.stringify(sub.toJSON())});const sd=await sr.json().catch(()=>({}));if(!sr.ok)throw new Error(sd.error||"Subscribe failed");
+  setStatus("pushStatus","✅ Notifications چالاک کرا.",true);$("pushBtn").textContent="🔔 Notifications Enabled";
+ }catch(e){setStatus("pushStatus","کێشە: "+e.message)}
+}
+(async()=>{try{if("serviceWorker"in navigator)await navigator.serviceWorker.register("/sw-admin.js",{scope:"/"})}catch(e){}if("Notification"in window&&Notification.permission==="granted")$("pushBtn").textContent="🔔 Notifications Enabled";if(ADMIN_KEY)loadOrders()})();
 </script>
-
 </body>
 </html>
