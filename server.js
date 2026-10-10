@@ -9,8 +9,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const ADMIN_KEY = process.env.ADMIN_KEY || 'CHANGE_THIS_ADMIN_KEY';
 const publicDir = path.join(__dirname, 'public');
-const dataDir = path.join(__dirname, 'data');
-const uploadsDir = path.join(__dirname, 'uploads');
+const dataDir = process.env.DATA_DIR || path.join(__dirname, 'data');
+const uploadsDir = path.join(dataDir, 'uploads');
 fs.mkdirSync(publicDir, { recursive:true });
 fs.mkdirSync(dataDir, { recursive:true });
 fs.mkdirSync(uploadsDir, { recursive:true });
@@ -47,7 +47,7 @@ app.use((req,res,next)=>{
     res.setHeader('Access-Control-Allow-Origin',origin);
     res.setHeader('Vary','Origin');
   }
-  res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods','GET,POST,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers','Content-Type,x-admin-key');
   if(req.method==='OPTIONS') return res.sendStatus(204);
   next();
