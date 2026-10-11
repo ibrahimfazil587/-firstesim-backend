@@ -1,3 +1,4 @@
+
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
@@ -24,7 +25,9 @@ const vapidFile = path.join(dataDir, 'vapid.json');
 
 if (!fs.existsSync(dbFile)) fs.writeFileSync(dbFile, '[]');
 if (!fs.existsSync(pushFile)) fs.writeFileSync(pushFile, '[]');
-if (!fs.existsSync(customerPushFile)) fs.writeFileSync(customerPushFile, '[]');
+if (!fs.existsSync(customerPushFile)) {
+  fs.writeFileSync(customerPushFile, '[]');
+}
 
 function readJson(file, fallback) {
   try {
@@ -42,29 +45,39 @@ function readOrders() {
   return readJson(dbFile, []);
 }
 
-function saveOrders(v) {
-  writeJson(dbFile, v);
+function saveOrders(value) {
+  writeJson(dbFile, value);
 }
 
 function readSubs() {
   return readJson(pushFile, []);
 }
 
-function saveSubs(v) {
-  writeJson(pushFile, v);
+function saveSubs(value) {
+  writeJson(pushFile, value);
 }
 
 function readCustomerSubs() {
   return readJson(customerPushFile, []);
 }
 
-function saveCustomerSubs(v) {
-  writeJson(customerPushFile, v);
+function saveCustomerSubs(value) {
+  writeJson(customerPushFile, value);
 }
 
+// VAPID keys: persist them using a persistent Render disk or
+// provide stable VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY env vars.
 let vapid = readJson(vapidFile, null);
 
-if (!vapid || !vapid.publicKey || !vapid.privateKey) {
+if (
+  process.env.VAPID_PUBLIC_KEY &&
+  process.env.VAPID_PRIVATE_KEY
+) {
+  vapid = {
+    publicKey: process.env.VAPID_PUBLIC_KEY,
+    privateKey: process.env.VAPID_PRIVATE_KEY
+  };
+} else if (!vapid || !vapid.publicKey || !vapid.privateKey) {
   vapid = webpush.generateVAPIDKeys();
   writeJson(vapidFile, vapid);
 }
@@ -112,10 +125,8 @@ app.use('/uploads', express.static(uploadsDir));
 
 const storage = multer.diskStorage({
   destination: uploadsDir,
-
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname);
-
     cb(
       null,
       Date.now() + '-' + crypto.randomBytes(5).toString('hex') + ext
@@ -123,7 +134,10 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
 
 function adminOnly(req, res, next) {
   if (req.headers['x-admin-key'] !== ADMIN_KEY) {
@@ -133,6 +147,46 @@ function adminOnly(req, res, next) {
   next();
 }
 
+// Send notification to admins when a new order is created.
+async function notifyAdmins(order) {
+  const subs = readSubs();
+
+  if (!subs.length) {
+    console.log('Admin push: no subscriptions saved for', order.id);
+    return;
+  }
+
+  const payload = JSON.stringify({
+    title: 'FirstESIM — Order نوێ 🔔',
+    body: `${order.id} — ${order.country} — ${order.plan} — ${order.price}`,
+    url: `https://firstesim.net/admin.html?order=${encodeURIComponent(order.id)}`,
+    orderId: order.id,
+    tag: 'order-' + order.id
+  });
+
+  const keep = [];
+
+  for (const sub of subs) {
+    try {
+      await webpush.sendNotification(sub, payload);
+      keep.push(sub);
+    } catch (err) {
+      console.error(
+        'Admin push send error:',
+        err.statusCode || '',
+        err.message || err
+      );
+
+      if (err.statusCode !== 404 && err.statusCode !== 410) {
+        keep.push(sub);
+      }
+    }
+  }
+
+  saveSubs(keep);
+}
+
+// Customer push subscription: used to notify when their QR is ready.
 app.get('/api/customer/push/public-key', (req, res) => {
   res.json({ ok: true, publicKey: vapid.publicKey });
 });
@@ -155,8 +209,7 @@ app.post('/api/customer/push/subscribe', (req, res) => {
     });
   }
 
-  const orders = readOrders();
-  const order = orders.find(x => x.id === orderId);
+  const order = readOrders().find(item => item.id === orderId);
 
   if (!order) {
     return res.status(404).json({ error: 'Order not found' });
@@ -174,24 +227,30 @@ app.post('/api/customer/push/subscribe', (req, res) => {
     }
   };
 
-  const idx = subs.findIndex(x => x.endpoint === clean.endpoint);
+  const index = subs.findIndex(
+    item => item.endpoint === clean.endpoint &&
+            item.orderId === clean.orderId
+  );
 
-  if (idx >= 0) {
-    subs[idx] = clean;
+  if (index >= 0) {
+    subs[index] = clean;
   } else {
     subs.push(clean);
   }
 
   saveCustomerSubs(subs);
-
   res.json({ ok: true });
 });
 
+// Notify customer when their eSIM QR is ready.
 async function notifyCustomers(order) {
   const all = readCustomerSubs();
-  const subs = all.filter(x => x.orderId === order.id);
+  const targets = all.filter(item => item.orderId === order.id);
 
-  if (!subs.length) return;
+  if (!targets.length) {
+    console.log('Customer push: no subscription for', order.id);
+    return;
+  }
 
   const payload = JSON.stringify({
     title: 'FirstESIM — QR ـەکەت ئامادەیە 🔔',
@@ -245,60 +304,90 @@ app.get('/api/admin/push/public-key', adminOnly, (req, res) => {
 app.post('/api/admin/push/subscribe', adminOnly, (req, res) => {
   const sub = req.body?.subscription;
 
-  if (!sub || !sub.endpoint) {
+  if (
+    !sub ||
+    !sub.endpoint ||
+    !sub.keys ||
+    !sub.keys.p256dh ||
+    !sub.keys.auth
+  ) {
     return res.status(400).json({
       error: 'Invalid subscription'
     });
   }
 
-  const subs = readSubs();
-  const idx = subs.findIndex(x => x.endpoint === sub.endpoint);
+  const clean = {
+    endpoint: sub.endpoint,
+    expirationTime: sub.expirationTime ?? null,
+    keys: {
+      p256dh: sub.keys.p256dh,
+      auth: sub.keys.auth
+    }
+  };
 
-  if (idx >= 0) {
-    subs[idx] = sub;
+  const subs = readSubs();
+  const index = subs.findIndex(item => item.endpoint === clean.endpoint);
+
+  if (index >= 0) {
+    subs[index] = clean;
   } else {
-    subs.push(sub);
+    subs.push(clean);
   }
 
   saveSubs(subs);
-
   res.json({ ok: true });
 });
 
 app.post('/api/admin/push/unsubscribe', adminOnly, (req, res) => {
   const endpoint = req.body?.endpoint;
 
-  saveSubs(readSubs().filter(x => x.endpoint !== endpoint));
+  if (!endpoint) {
+    return res.status(400).json({ error: 'Endpoint required' });
+  }
 
+  saveSubs(readSubs().filter(item => item.endpoint !== endpoint));
   res.json({ ok: true });
 });
+
+// Create order, save receipt, and notify admins.
 app.post('/api/orders', upload.single('receipt'), async (req, res) => {
-  const orders = readOrders();
+  try {
+    const orders = readOrders();
 
-  const order = {
-    id: 'FE-' + Date.now().toString().slice(-8),
-    createdAt: new Date().toISOString(),
-    customerName: req.body.customerName || '',
-    customerPhone: req.body.customerPhone || '',
-    country: req.body.country || '',
-    plan: req.body.plan || '',
-    price: req.body.price || '',
-    payment: req.body.payment || '',
-    receiptUrl: req.file ? '/uploads/' + req.file.filename : '',
-    status: 'waiting_payment_check',
-    qrUrl: '',
-    activationCode: '',
-    notes: ''
-  };
+    const order = {
+      id: 'FE-' + Date.now().toString().slice(-8),
+      createdAt: new Date().toISOString(),
+      customerName: req.body.customerName || '',
+      customerPhone: req.body.customerPhone || '',
+      country: req.body.country || '',
+      plan: req.body.plan || '',
+      price: req.body.price || '',
+      payment: req.body.payment || '',
+      receiptUrl: req.file ? '/uploads/' + req.file.filename : '',
+      status: 'waiting_payment_check',
+      paymentConfirmedAt: '',
+      qrUrl: '',
+      qrUploadedAt: '',
+      activationCode: '',
+      notes: ''
+    };
 
-  orders.unshift(order);
-  saveOrders(orders);
+    orders.unshift(order);
+    saveOrders(orders);
 
-  res.json({ ok: true, order });
+    res.json({ ok: true, order });
+
+    notifyAdmins(order).catch(err => {
+      console.error('Admin notification failed:', err);
+    });
+  } catch (err) {
+    console.error('Order creation failed:', err);
+    res.status(500).json({ error: 'Could not create order' });
+  }
 });
 
 app.get('/api/orders/:id', (req, res) => {
-  const order = readOrders().find(x => x.id === req.params.id);
+  const order = readOrders().find(item => item.id === req.params.id);
 
   if (!order) {
     return res.status(404).json({ error: 'Order not found' });
@@ -321,7 +410,7 @@ app.post('/api/admin/orders/:id/status', adminOnly, (req, res) => {
   ];
 
   const orders = readOrders();
-  const order = orders.find(x => x.id === req.params.id);
+  const order = orders.find(item => item.id === req.params.id);
 
   if (!order) {
     return res.status(404).json({ error: 'Order not found' });
@@ -334,14 +423,21 @@ app.post('/api/admin/orders/:id/status', adminOnly, (req, res) => {
   order.status = req.body.status;
   order.updatedAt = new Date().toISOString();
 
-  saveOrders(orders);
+  if (
+    req.body.status === 'payment_confirmed' &&
+    !order.paymentConfirmedAt
+  ) {
+    order.paymentConfirmedAt = new Date().toISOString();
+  }
 
+  saveOrders(orders);
   res.json({ ok: true, order });
 });
 
+// Upload QR and notify the customer.
 app.post('/api/admin/orders/:id/qr', adminOnly, upload.single('qr'), (req, res) => {
   const orders = readOrders();
-  const order = orders.find(x => x.id === req.params.id);
+  const order = orders.find(item => item.id === req.params.id);
 
   if (!order) {
     return res.status(404).json({ error: 'Order not found' });
@@ -363,14 +459,14 @@ app.post('/api/admin/orders/:id/qr', adminOnly, upload.single('qr'), (req, res) 
 
   res.json({ ok: true, order });
 
-  notifyCustomers(order).catch(
-    e => console.error('customer push notification error', e)
-  );
+  notifyCustomers(order).catch(err => {
+    console.error('Customer notification failed:', err);
+  });
 });
 
 app.delete('/api/admin/orders/:id', adminOnly, (req, res) => {
   const orders = readOrders();
-  const index = orders.findIndex(x => x.id === req.params.id);
+  const index = orders.findIndex(item => item.id === req.params.id);
 
   if (index === -1) {
     return res.status(404).json({ error: 'Order not found' });
