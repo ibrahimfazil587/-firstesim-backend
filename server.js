@@ -24,6 +24,7 @@ const customerPushFile = path.join(dataDir, 'customer-push-subscriptions.json');
 const vapidFile = path.join(dataDir, 'vapid.json');
 const usersFile = path.join(dataDir, 'users.json');
 const authSecretFile = path.join(dataDir, 'auth-secret.txt');
+const otpFile = path.join(dataDir, 'auth-otps.json');
 
 if (!fs.existsSync(dbFile)) fs.writeFileSync(dbFile, '[]');
 if (!fs.existsSync(pushFile)) fs.writeFileSync(pushFile, '[]');
@@ -31,6 +32,7 @@ if (!fs.existsSync(customerPushFile)) {
   fs.writeFileSync(customerPushFile, '[]');
 }
 if (!fs.existsSync(usersFile)) fs.writeFileSync(usersFile, '[]');
+if (!fs.existsSync(otpFile)) fs.writeFileSync(otpFile, '{}');
 if (!fs.existsSync(authSecretFile)) fs.writeFileSync(authSecretFile, crypto.randomBytes(48).toString('hex'), { mode: 0o600 });
 const AUTH_SECRET = process.env.AUTH_SECRET || fs.readFileSync(authSecretFile, 'utf8').trim();
 
@@ -157,7 +159,7 @@ function adminOnly(req, res, next) {
 function normalizeEmail(value) { return String(value || '').trim().toLowerCase(); }
 function normalizePhone(value) { return String(value || '').trim().replace(/[\s()-]/g, ''); }
 function publicUser(user) {
-  return { id: user.id, email: user.email, phone: user.phone, createdAt: user.createdAt };
+  return { id: user.id, email: user.email, phone: user.phone, emailVerified: !!user.emailVerified, phoneVerified: !!user.phoneVerified, createdAt: user.createdAt };
 }
 function signToken(user) {
   const payload = Buffer.from(JSON.stringify({ sub: user.id, exp: Date.now() + 30 * 24 * 60 * 60 * 1000 })).toString('base64url');
@@ -203,6 +205,83 @@ function rateLimitAuth(req, res, next) {
   if (old.count > 30) return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
   next();
 }
+
+
+// Email/SMS verification and password reset. Delivery requires SMTP and Twilio environment settings.
+const otpStore = () => readJson(otpFile, {});
+function saveOtpStore(v) { writeJson(otpFile, v); }
+function otpHash(code, salt) { return crypto.createHmac('sha256', AUTH_SECRET).update(salt + ':' + code).digest('hex'); }
+function makeCode() { return String(crypto.randomInt(0, 1000000)).padStart(6, '0'); }
+async function sendEmailCode(to, subject, body) {
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS || !process.env.SMTP_FROM) {
+    const e = new Error('Email delivery is not configured.'); e.status = 503; throw e;
+  }
+  const nodemailer = require('nodemailer');
+  const transport = nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||587),secure:process.env.SMTP_SECURE==='true',auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}});
+  await transport.sendMail({from:process.env.SMTP_FROM,to,subject,text:body});
+}
+async function sendSmsCode(to, body) {
+  const sid=process.env.TWILIO_ACCOUNT_SID, token=process.env.TWILIO_AUTH_TOKEN, from=process.env.TWILIO_FROM;
+  if(!sid||!token||!from){const e=new Error('SMS delivery is not configured.');e.status=503;throw e;}
+  const auth=Buffer.from(sid+':'+token).toString('base64');
+  const form=new URLSearchParams({To:to,From:from,Body:body});
+  const r=await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,{method:'POST',headers:{Authorization:`Basic ${auth}`,'Content-Type':'application/x-www-form-urlencoded'},body:form});
+  if(!r.ok){const e=new Error('SMS provider could not send the message.');e.status=502;throw e;}
+}
+async function deliverCode(purpose,user,channel) {
+  const key=`${purpose}:${user.id}:${channel}`, store=otpStore(), old=store[key];
+  if(old && Date.now()-old.sentAt<60000){const e=new Error('Wait one minute before requesting another code.');e.status=429;throw e;}
+  const code=makeCode(), salt=crypto.randomBytes(16).toString('hex'), destination=channel==='email'?user.email:user.phone;
+  store[key]={userId:user.id,purpose,channel,destination,salt,hash:otpHash(code,salt),expiresAt:Date.now()+600000,attempts:0,sentAt:Date.now()};
+  saveOtpStore(store);
+  try {
+    const label=purpose==='reset'?'password reset':'account verification';
+    if(channel==='email') await sendEmailCode(destination,'FirstESIM verification code',`Your FirstESIM ${label} code is ${code}. It expires in 10 minutes.`);
+    else await sendSmsCode(destination,`Your FirstESIM ${label} code is ${code}. It expires in 10 minutes.`);
+  } catch(e) { const s=otpStore();delete s[key];saveOtpStore(s);throw e; }
+}
+function verifyOtp(purpose,user,channel,code) {
+  const s=otpStore(), key=`${purpose}:${user.id}:${channel}`, item=s[key];
+  if(!item||item.expiresAt<Date.now()||item.attempts>=5){delete s[key];saveOtpStore(s);return false;}
+  item.attempts++;
+  const a=Buffer.from(otpHash(String(code),item.salt),'hex'),b=Buffer.from(item.hash,'hex');
+  const ok=a.length===b.length&&crypto.timingSafeEqual(a,b);
+  if(ok)delete s[key];saveOtpStore(s);return ok;
+}
+function lookupIdentity(identity) {
+  const v=String(identity||'').trim();
+  return readUsers().find(u=>u.email===normalizeEmail(v)||u.phone===normalizePhone(v));
+}
+app.post('/api/auth/send-verification',rateLimitAuth,async(req,res)=>{
+  try{const user=getTokenUser(req);if(!user)return res.status(401).json({ok:false,error:'Please sign in again.'});
+  const channel=req.body?.channel;if(!['email','phone'].includes(channel))return res.status(400).json({ok:false,error:'Choose email or phone.'});
+  await deliverCode('verify',user,channel);res.json({ok:true,message:'Code sent.'});}
+  catch(e){res.status(e.status||500).json({ok:false,error:e.message||'Could not send code.'});}
+});
+app.post('/api/auth/verify',rateLimitAuth,(req,res)=>{
+  const user=getTokenUser(req);if(!user)return res.status(401).json({ok:false,error:'Please sign in again.'});
+  const channel=req.body?.channel,code=String(req.body?.code||'');
+  if(!['email','phone'].includes(channel)||!/^\d{6}$/.test(code))return res.status(400).json({ok:false,error:'Enter the six-digit code.'});
+  if(!verifyOtp('verify',user,channel,code))return res.status(400).json({ok:false,error:'Invalid or expired code.'});
+  const users=readUsers(),i=users.findIndex(u=>u.id===user.id);if(i<0)return res.status(404).json({ok:false,error:'Account not found.'});
+  users[i][channel+'Verified']=true;saveUsers(users);res.json({ok:true,user:publicUser(users[i])});
+});
+app.post('/api/auth/forgot-password',rateLimitAuth,async(req,res)=>{
+  try{const channel=req.body?.channel,identity=req.body?.identity;if(!['email','phone'].includes(channel))return res.status(400).json({ok:false,error:'Choose email or phone.'});
+  const user=lookupIdentity(identity);
+  if(user)await deliverCode('reset',user,channel);
+  res.json({ok:true,message:'If the account exists, a code will be sent.'});}
+  catch(e){res.status(e.status||500).json({ok:false,error:e.message||'Could not send reset code.'});}
+});
+app.post('/api/auth/reset-password',rateLimitAuth,(req,res)=>{
+  const identity=String(req.body?.identity||'').trim(),channel=req.body?.channel,code=String(req.body?.code||''),password=String(req.body?.password||'');
+  if(!['email','phone'].includes(channel)||!/^\d{6}$/.test(code)||password.length<10||password.length>128)return res.status(400).json({ok:false,error:'Enter a valid code and password (10–128 characters).'});
+  const user=lookupIdentity(identity);if(!user||(channel==='email'&&user.email!==normalizeEmail(identity))||(channel==='phone'&&user.phone!==normalizePhone(identity)))return res.status(400).json({ok:false,error:'Invalid or expired code.'});
+  if(!verifyOtp('reset',user,channel,code))return res.status(400).json({ok:false,error:'Invalid or expired code.'});
+  const users=readUsers(),i=users.findIndex(u=>u.id===user.id),salt=crypto.randomBytes(16).toString('hex');
+  users[i].salt=salt;users[i].passwordHash=crypto.scryptSync(password,salt,64).toString('hex');saveUsers(users);
+  res.json({ok:true,message:'Password reset successfully. Please sign in.'});
+});
 
 app.post('/api/auth/register', rateLimitAuth, (req, res) => {
   const email = normalizeEmail(req.body?.email);
