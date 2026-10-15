@@ -22,12 +22,17 @@ const dbFile = path.join(dataDir, 'orders.json');
 const pushFile = path.join(dataDir, 'push-subscriptions.json');
 const customerPushFile = path.join(dataDir, 'customer-push-subscriptions.json');
 const vapidFile = path.join(dataDir, 'vapid.json');
+const usersFile = path.join(dataDir, 'users.json');
+const authSecretFile = path.join(dataDir, 'auth-secret.txt');
 
 if (!fs.existsSync(dbFile)) fs.writeFileSync(dbFile, '[]');
 if (!fs.existsSync(pushFile)) fs.writeFileSync(pushFile, '[]');
 if (!fs.existsSync(customerPushFile)) {
   fs.writeFileSync(customerPushFile, '[]');
 }
+if (!fs.existsSync(usersFile)) fs.writeFileSync(usersFile, '[]');
+if (!fs.existsSync(authSecretFile)) fs.writeFileSync(authSecretFile, crypto.randomBytes(48).toString('hex'), { mode: 0o600 });
+const AUTH_SECRET = process.env.AUTH_SECRET || fs.readFileSync(authSecretFile, 'utf8').trim();
 
 function readJson(file, fallback) {
   try {
@@ -48,6 +53,8 @@ function readOrders() {
 function saveOrders(value) {
   writeJson(dbFile, value);
 }
+function readUsers() { return readJson(usersFile, []); }
+function saveUsers(value) { writeJson(usersFile, value); }
 
 function readSubs() {
   return readJson(pushFile, []);
@@ -110,7 +117,7 @@ app.use((req, res, next) => {
 
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type,x-admin-key'
+    'Content-Type,x-admin-key,Authorization'
   );
 
   if (req.method === 'OPTIONS') {
@@ -143,9 +150,99 @@ function adminOnly(req, res, next) {
   if (req.headers['x-admin-key'] !== ADMIN_KEY) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-
   next();
 }
+
+// Customer accounts: email + phone + password. Passwords are salted and hashed.
+function normalizeEmail(value) { return String(value || '').trim().toLowerCase(); }
+function normalizePhone(value) { return String(value || '').trim().replace(/[\s()-]/g, ''); }
+function publicUser(user) {
+  return { id: user.id, email: user.email, phone: user.phone, createdAt: user.createdAt };
+}
+function signToken(user) {
+  const payload = Buffer.from(JSON.stringify({ sub: user.id, exp: Date.now() + 30 * 24 * 60 * 60 * 1000 })).toString('base64url');
+  const sig = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
+  return payload + '.' + sig;
+}
+function getTokenUser(req) {
+  const header = String(req.headers.authorization || '');
+  if (!header.startsWith('Bearer ')) return null;
+  const token = header.slice(7).trim();
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const expected = crypto.createHmac('sha256', AUTH_SECRET).update(parts[0]).digest();
+  let got;
+  try { got = Buffer.from(parts[1], 'base64url'); } catch (_) { return null; }
+  if (got.length !== expected.length || !crypto.timingSafeEqual(got, expected)) return null;
+  try {
+    const p = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    if (!p.sub || !p.exp || p.exp < Date.now()) return null;
+    return readUsers().find(u => u.id === p.sub) || null;
+  } catch (_) { return null; }
+}
+function requireCustomer(req, res, next) {
+  const user = getTokenUser(req);
+  if (!user) return res.status(401).json({ error: 'Please sign in again.' });
+  req.customer = user;
+  next();
+}
+function optionalCustomer(req, res, next) {
+  const auth = req.headers.authorization;
+  if (auth && !getTokenUser(req)) return res.status(401).json({ error: 'Invalid or expired account session.' });
+  req.customer = auth ? getTokenUser(req) : null;
+  next();
+}
+const loginAttempts = new Map();
+function rateLimitAuth(req, res, next) {
+  const key = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const old = loginAttempts.get(key) || { start: now, count: 0 };
+  if (now - old.start > 15 * 60 * 1000) { old.start = now; old.count = 0; }
+  old.count++;
+  loginAttempts.set(key, old);
+  if (old.count > 30) return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
+  next();
+}
+
+app.post('/api/auth/register', rateLimitAuth, (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const phone = normalizePhone(req.body?.phone);
+  const password = String(req.body?.password || '');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+  if (!/^\+?[0-9]{7,18}$/.test(phone)) return res.status(400).json({ error: 'Enter a valid phone number with country code.' });
+  if (password.length < 10 || password.length > 128) return res.status(400).json({ error: 'Password must be 10–128 characters.' });
+  const users = readUsers();
+  if (users.some(u => u.email === email)) return res.status(409).json({ error: 'This email is already registered.' });
+  if (users.some(u => u.phone === phone)) return res.status(409).json({ error: 'This phone number is already registered.' });
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = crypto.scryptSync(password, salt, 64).toString('hex');
+  const user = { id: 'CUS-' + crypto.randomBytes(12).toString('hex'), email, phone, salt, passwordHash, createdAt: new Date().toISOString() };
+  users.push(user); saveUsers(users);
+  res.status(201).json({ ok: true, token: signToken(user), user: publicUser(user), note: 'Email and phone have not been independently verified.' });
+});
+
+app.post('/api/auth/login', rateLimitAuth, (req, res) => {
+  const identifier = String(req.body?.identifier || '').trim();
+  const email = normalizeEmail(identifier);
+  const phone = normalizePhone(identifier);
+  const password = String(req.body?.password || '');
+  const user = readUsers().find(u => u.email === email || u.phone === phone);
+  if (!user || !user.salt || !user.passwordHash) return res.status(401).json({ error: 'Email/phone or password is incorrect.' });
+  const candidate = crypto.scryptSync(password, user.salt, 64);
+  const stored = Buffer.from(user.passwordHash, 'hex');
+  if (candidate.length !== stored.length || !crypto.timingSafeEqual(candidate, stored)) return res.status(401).json({ error: 'Email/phone or password is incorrect.' });
+  res.json({ ok: true, token: signToken(user), user: publicUser(user) });
+});
+
+app.get('/api/auth/me', requireCustomer, (req, res) => {
+  res.json({ ok: true, user: publicUser(req.customer) });
+});
+
+app.get('/api/account/orders', requireCustomer, (req, res) => {
+  const orders = readOrders().filter(order => order.customerId === req.customer.id)
+    .map(({ customerId, ...order }) => order);
+  res.json({ ok: true, orders });
+});
 
 // Send notification to admins when a new order is created.
 async function notifyAdmins(order) {
@@ -350,7 +447,7 @@ app.post('/api/admin/push/unsubscribe', adminOnly, (req, res) => {
 });
 
 // Create order, save receipt, and notify admins.
-app.post('/api/orders', upload.single('receipt'), async (req, res) => {
+app.post('/api/orders', optionalCustomer, upload.single('receipt'), async (req, res) => {
   try {
     const orders = readOrders();
 
@@ -358,7 +455,8 @@ app.post('/api/orders', upload.single('receipt'), async (req, res) => {
       id: 'FE-' + Date.now().toString().slice(-8),
       createdAt: new Date().toISOString(),
       customerName: req.body.customerName || '',
-      customerPhone: req.body.customerPhone || '',
+      customerPhone: req.body.customerPhone || (req.customer ? req.customer.phone : ''),
+      customerId: req.customer ? req.customer.id : '',
       country: req.body.country || '',
       plan: req.body.plan || '',
       price: req.body.price || '',
@@ -393,7 +491,8 @@ app.get('/api/orders/:id', (req, res) => {
     return res.status(404).json({ error: 'Order not found' });
   }
 
-  res.json({ ok: true, order });
+  const { customerId, ...safeOrder } = order;
+  res.json({ ok: true, order: safeOrder });
 });
 
 app.get('/api/admin/orders', adminOnly, (req, res) => {
